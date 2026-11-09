@@ -1,0 +1,206 @@
+# RandomClock – ESPHome-Port von RandomClock.ino
+# 27 x WS2812(B) an D6 (GPIO12), Anzeige als Zufallsmuster.
+# Jeder Block ist ein eigenes Licht in HA (Farbe + Helligkeit):
+#   LED  0– 2: Stunde Zehner  (0–2)
+#   LED  3–11: Stunde Einer   (0–9)
+#   LED 12–17: Minute Zehner  (0–5)
+#   LED 18–26: Minute Einer   (0–9)
+
+substitutions:
+  # Gemeinsamer Effekt-Code. Vorher muss im Lambda "digit(t)" definiert sein,
+  # das die anzuzeigende Ziffer liefert. Neu gezeichnet wird bei Minutenwechsel
+  # oder wenn Farbe/Helligkeit in HA geändert wurde.
+  random_fill: |-
+    static int last_min = -1;
+    static Color last_c;
+    auto t = id(sntp_time).now();
+    if (!t.is_valid()) return;
+    if (!initial_run && t.minute == last_min && current_color == last_c) return;
+    last_min = t.minute;
+    last_c = current_color;
+    int n = it.size();
+    int k = digit(t);
+    int idx[9];
+    for (int i = 0; i < n; i++) idx[i] = i;
+    for (int i = 0; i < k; i++) {        // partieller Fisher-Yates
+      int j = i + random_uint32() % (n - i);
+      std::swap(idx[i], idx[j]);
+    }
+    it.all() = Color::BLACK;
+    for (int i = 0; i < k; i++) it[idx[i]] = current_color;
+
+esphome:
+  name: randomclock
+  friendly_name: RandomClock
+  on_boot:
+    priority: -100
+    then:
+      # Effekt auf allen eingeschalteten Blöcken (wieder) aktivieren;
+      # Farbe/Helligkeit bleiben dabei unverändert.
+      - lambda: |-
+          for (auto *l : {id(blk_h10), id(blk_h1), id(blk_m10), id(blk_m1)})
+            if (l->current_values.is_on())
+              l->turn_on().set_effect("Zufall").perform();
+
+esp8266:
+  board: d1_mini
+  restore_from_flash: false    # nie in den Flash schreiben; Einstellungen nur im RTC-RAM
+
+logger:
+
+# Enable Home Assistant API
+api:
+  reboot_timeout: 600min
+
+ota:
+  - platform: esphome
+
+
+wifi:
+  networks:
+  - ssid: !secret GKssid
+    password: !secret GKpassword
+  - ssid: !secret BGssid
+    password: !secret BGpassword
+  - ssid: !secret SSssid
+    password: !secret SSpassword
+  ap:
+    ssid: "RandomClock"        # Fallback-AP wie im Original
+
+captive_portal:
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: Europe/Berlin
+    servers:
+      - de.pool.ntp.org
+
+output:
+  - platform: gpio
+    pin: GPIO2
+    id: 'GPLEDint'
+
+switch:
+  - platform: output
+    id: "LEDint"
+    name: "LEDint"
+    output: "GPLEDint"
+    inverted: true
+    restore_mode: ALWAYS_OFF
+  - platform: restart
+    name: "Restart"
+
+text_sensor:
+  - platform: version
+    name: "ESPHome Version"
+
+binary_sensor:
+  - platform: status
+    name: "Statussensor"
+    id: statussensor
+
+sensor:
+  - platform: wifi_signal # Reports the WiFi signal strength/RSSI in dB
+    name: "WiFi Signal dB"
+    id: wifi_signal_db
+    update_interval: 60s
+    entity_category: "diagnostic"
+
+  - platform: copy # Reports the WiFi signal strength in %
+    source_id: wifi_signal_db
+    name: "WiFi Signal Percent"
+    filters:
+      - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
+    unit_of_measurement: "Signal %"
+    entity_category: "diagnostic"
+    device_class: ""
+
+
+light:
+  # Physischer Strip – ohne Namen, also nur intern; gesteuert wird über die Blöcke
+  - platform: neopixelbus
+    id: clock_leds
+    type: GRB
+    variant: WS2812X
+    pin: GPIO12                # D6
+    num_leds: 27
+    gamma_correct: 1.0
+
+  # Startwerte (initial_state, nach jedem Stromausfall) = Farben aus der .ino, Helligkeit ~ setBrightness(10).
+  # Danach gilt, was in HA eingestellt wurde.
+  - platform: partition
+    id: blk_h10
+    name: "Stunde Zehner"
+    segments:
+      - id: clock_leds
+        from: 0
+        to: 2
+    gamma_correct: 1.0
+    default_transition_length: 0s
+    restore_state: all
+    initial_state: {state: on, brightness: 4%, red: 20%, green: 100%, blue: 60%}
+    effects:
+      - addressable_lambda:
+          name: "Zufall"
+          update_interval: 1s
+          lambda: |-
+            auto digit = [](const ESPTime &t) { return t.hour / 10; };
+            ${random_fill}
+
+  - platform: partition
+    id: blk_h1
+    name: "Stunde Einer"
+    segments:
+      - id: clock_leds
+        from: 3
+        to: 11
+    gamma_correct: 1.0
+    default_transition_length: 0s
+    restore_state: all
+    initial_state: {state: on, brightness: 4%, red: 100%, green: 100%, blue: 20%}
+    effects:
+      - addressable_lambda:
+          name: "Zufall"
+          update_interval: 1s
+          lambda: |-
+            auto digit = [](const ESPTime &t) { return t.hour % 10; };
+            ${random_fill}
+
+  - platform: partition
+    id: blk_m10
+    name: "Minute Zehner"
+    segments:
+      - id: clock_leds
+        from: 12
+        to: 17
+    gamma_correct: 1.0
+    default_transition_length: 0s
+    restore_state: all
+    initial_state: {state: on, brightness: 4%, red: 100%, green: 20%, blue: 100%}
+    effects:
+      - addressable_lambda:
+          name: "Zufall"
+          update_interval: 1s
+          lambda: |-
+            auto digit = [](const ESPTime &t) { return t.minute / 10; };
+            ${random_fill}
+
+  - platform: partition
+    id: blk_m1
+    name: "Minute Einer"
+    segments:
+      - id: clock_leds
+        from: 18
+        to: 26
+    gamma_correct: 1.0
+    default_transition_length: 0s
+    restore_state: all
+    initial_state: {state: on, brightness: 2.4%, red: 0%, green: 100%, blue: 100%}
+    effects:
+      - addressable_lambda:
+          name: "Zufall"
+          update_interval: 1s
+          lambda: |-
+            auto digit = [](const ESPTime &t) { return t.minute % 10; };
+            ${random_fill}
